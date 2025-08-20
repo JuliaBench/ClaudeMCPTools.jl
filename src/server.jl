@@ -94,6 +94,84 @@ function handle_tools_call(server::MCPServer, params::Dict)
 end
 
 """
+    run_unix_socket_server(server::MCPServer, socket_path::String; verbose::Bool=false, cleanup::Bool=true)
+
+Run the MCP server on a Unix domain socket.
+"""
+function run_unix_socket_server(server::MCPServer, socket_path::String; verbose::Bool=false, cleanup::Bool=true)
+    
+    # Clean up existing socket if it exists
+    if cleanup && isfile(socket_path)
+        rm(socket_path)
+    end
+    
+    # Create the Unix socket
+    socket = listen(socket_path)
+    
+    if verbose
+        @info "MCP server listening on Unix socket: $socket_path"
+    end
+    
+    try
+        while true
+            # Accept a connection
+            client = accept(socket)
+            
+            if verbose
+                @info "Client connected to Unix socket"
+            end
+            
+            # Handle the client in a task
+            @async try
+                while isopen(client)
+                    # Read a line from the client
+                    line = readline(client)
+                    
+                    if isempty(line)
+                        continue
+                    end
+                    
+                    # Parse and handle the request
+                    try
+                        request = JSON.parse(line)
+                        response = handle_request(server, request)
+                        println(client, JSON.json(response))
+                        flush(client)
+                    catch e
+                        if verbose
+                            @error "Error handling request" exception=e
+                        end
+                        error_response = Dict(
+                            "jsonrpc" => "2.0",
+                            "error" => Dict(
+                                "code" => -32700,
+                                "message" => "Parse error: $(string(e))"
+                            )
+                        )
+                        println(client, JSON.json(error_response))
+                        flush(client)
+                    end
+                end
+            catch e
+                if verbose && !(e isa EOFError)
+                    @error "Client connection error" exception=e
+                end
+            finally
+                close(client)
+                if verbose
+                    @info "Client disconnected from Unix socket"
+                end
+            end
+        end
+    finally
+        close(socket)
+        if cleanup && isfile(socket_path)
+            rm(socket_path)
+        end
+    end
+end
+
+"""
     run_stdio_server(server::MCPServer; verbose::Bool=false)
 
 Run the MCP server in stdio mode, reading JSON-RPC from stdin and writing to stdout.

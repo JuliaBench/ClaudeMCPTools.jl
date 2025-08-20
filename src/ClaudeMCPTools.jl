@@ -1,10 +1,11 @@
 module ClaudeMCPTools
 
 using JSON
+using Sockets
 
 export MCPServer, MCPTool, register_tool!, handle_request
 export BashTool, StrReplaceEditorTool
-export run_stdio_server, run_http_server
+export run_stdio_server, run_unix_socket_server
 
 # Include components
 include("types.jl")
