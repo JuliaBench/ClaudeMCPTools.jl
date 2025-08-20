@@ -14,8 +14,8 @@
     end
     
     @testset "Simple command execution" begin
-        # Test echo command
-        result = execute(bash, Dict("command" => "echo 'Hello World'"))
+        # Test echo command - use Julia command for cross-platform compatibility
+        result = execute(bash, Dict("command" => "julia -e \"println(\\\"Hello World\\\")\""))
         @test haskey(result, "content")
         @test result["content"][1]["type"] == "text"
         @test occursin("Hello World", result["content"][1]["text"])
