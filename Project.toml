@@ -1,11 +1,14 @@
 name = "ClaudeMCPTools"
 uuid = "b9bb1685-6a70-41d7-9793-2f9fb633d966"
-version = "0.1.0"
 authors = ["JuliaComputing"]
+version = "0.1.0"
 
 [deps]
 JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
 Sockets = "6462fe0b-24de-5631-8697-dd941f90decc"
+
+[compat]
+JSON = "1"
 
 [extras]
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
