@@ -62,26 +62,48 @@
             # Create a test file
             test_file = joinpath(tmpdir, "replace_test.txt")
             write(test_file, "Hello World\nThis is a test\nHello again")
-            
-            # Replace string
+
+            # Replace unique string (should succeed)
+            result = execute(editor, Dict(
+                "command" => "str_replace",
+                "path" => "replace_test.txt",
+                "old_str" => "Hello World",
+                "new_str" => "Hi World"
+            ))
+            @test haskey(result, "content")
+            text = result["content"][1]["text"]
+            @test occursin("edited successfully", text)
+            content = read(test_file, String)
+            @test occursin("Hi World", content)
+
+            # Non-unique match should fail by default
+            write(test_file, "Hello World\nThis is a test\nHello again")
             result = execute(editor, Dict(
                 "command" => "str_replace",
                 "path" => "replace_test.txt",
                 "old_str" => "Hello",
                 "new_str" => "Hi"
             ))
-            
+            @test result["isError"] == true
+            @test occursin("matches 2 times", result["content"][1]["text"])
+
+            # replace_all=true should succeed for non-unique match
+            result = execute(editor, Dict(
+                "command" => "str_replace",
+                "path" => "replace_test.txt",
+                "old_str" => "Hello",
+                "new_str" => "Hi",
+                "replace_all" => true
+            ))
             @test haskey(result, "content")
             text = result["content"][1]["text"]
             @test occursin("edited successfully", text)
             @test occursin("2 replacements", text)
-            
-            # Verify file was modified
             content = read(test_file, String)
             @test occursin("Hi World", content)
             @test occursin("Hi again", content)
             @test !occursin("Hello", content)
-            
+
             # Test replacing non-existent string
             result = execute(editor, Dict(
                 "command" => "str_replace",

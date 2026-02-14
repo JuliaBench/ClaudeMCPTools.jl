@@ -36,11 +36,15 @@ function tool_schema(::StrReplaceEditorTool)
                 ),
                 "old_str" => Dict(
                     "type" => "string",
-                    "description" => "String to replace (for str_replace command)"
+                    "description" => "String to replace (for str_replace command). Must be unique in the file unless replace_all is true."
                 ),
                 "new_str" => Dict(
                     "type" => "string",
                     "description" => "Replacement string (for str_replace command)"
+                ),
+                "replace_all" => Dict(
+                    "type" => "boolean",
+                    "description" => "Replace all occurrences of old_str (default: false). When false, old_str must match exactly once."
                 ),
                 "file_text" => Dict(
                     "type" => "string",
@@ -184,23 +188,25 @@ function execute(tool::StrReplaceEditorTool, params::AbstractDict)
             # Replace string in file
             old_str = get(params, "old_str", nothing)
             new_str = get(params, "new_str", nothing)
-            
+            replace_all = get(params, "replace_all", false)
+
             if old_str === nothing || new_str === nothing
                 return create_content_response("Error: Both old_str and new_str are required for str_replace", is_error=true)
             end
-            
+
             if !isfile(full_path)
                 return create_content_response("Error: File not found: $path", is_error=true)
             end
-            
+
             content = read(full_path, String)
-            
+
             if !occursin(old_str, content)
                 return create_content_response("Error: String not found in file", is_error=true)
             end
-            
+
             # Count occurrences using findnext
             occurrences = 0
+            occurrence_lines = Int[]
             pos = 1
             while true
                 range = findnext(old_str, content, pos)
@@ -208,11 +214,23 @@ function execute(tool::StrReplaceEditorTool, params::AbstractDict)
                     break
                 end
                 occurrences += 1
+                # Find line number of this occurrence
+                line_num = count(==('\n'), SubString(content, 1, first(range))) + 1
+                push!(occurrence_lines, line_num)
                 pos = last(range) + 1
             end
-            
+
+            # Enforce uniqueness unless replace_all is true
+            if !replace_all && occurrences > 1
+                lines_str = join(occurrence_lines, ", ")
+                return create_content_response(
+                    "Error: old_str matches $occurrences times (at lines $lines_str). " *
+                    "Provide a larger, unique string for old_str, or set replace_all=true.",
+                    is_error=true)
+            end
+
             # Replace the string
-            new_content = replace(content, old_str => new_str)
+            new_content = replace(content, old_str => new_str; count=replace_all ? typemax(Int) : 1)
             write(full_path, new_content)
             
             # Preserve ownership if UID is specified (in case file permissions changed)

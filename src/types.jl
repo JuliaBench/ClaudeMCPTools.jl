@@ -14,14 +14,13 @@ mutable struct MCPServer
     tools::Dict{String, MCPTool}
     metadata::Dict{String, Any}
     
-    function MCPServer(; name::String="ClaudeMCPTools", version::String="0.1.0")
-        new(
-            Dict{String, MCPTool}(),
-            Dict(
-                "name" => name,
-                "version" => version
-            )
-        )
+    function MCPServer(; name::String="ClaudeMCPTools", version::String="0.1.0",
+                         instructions::Union{String,Nothing}=nothing)
+        metadata = Dict{String,Any}("name" => name, "version" => version)
+        if instructions !== nothing
+            metadata["instructions"] = instructions
+        end
+        new(Dict{String, MCPTool}(), metadata)
     end
 end
 
@@ -40,7 +39,7 @@ end
 Execute a tool with the given parameters.
 Returns a Dict with a "content" field containing an array of content items.
 """
-function execute(tool::MCPTool, params::Dict)
+function execute(tool::MCPTool, params::AbstractDict)
     error("execute not implemented for $(typeof(tool))")
 end
 
