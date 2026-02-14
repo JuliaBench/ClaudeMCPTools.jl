@@ -274,83 +274,102 @@ function exec_command(manager::SessionManager, session::BashSession,
     end
 
     lock(session_lock) do
-        if !process_running(session.process) && !isopen(session.output_channel)
-            return ("Error: process has exited", 1, true, false)
-        end
+        _exec_command_locked(manager, session, command, timeout_ms)
+    end
+end
 
-        marker = generate_marker()
+function _exec_command_locked(manager::SessionManager, session::BashSession,
+                              command::String, timeout_ms::Int)
+    if !process_running(session.process) && !isopen(session.output_channel)
+        return ("Error: process has exited", 1, true, false)
+    end
 
-        # Run command directly in the main shell (no subshell) so state like
-        # `cd` persists.  stderr already redirected via `exec 2>&1`.
-        wrapped = "$(command)\n__MCP_EC__=\$?; printf '\\n$(marker)%d\\n' \"\$__MCP_EC__\"\n"
+    marker = generate_marker()
 
+    # Run command directly in the main shell (no subshell) so state like
+    # `cd` persists.  stderr already redirected via `exec 2>&1`.
+    wrapped = "$(command)\n__MCP_EC__=\$?; printf '\\n$(marker)%d\\n' \"\$__MCP_EC__\"\n"
+
+    try
+        write(session.stdin_pipe, wrapped)
+        flush(session.stdin_pipe)
+    catch e
+        return ("Error writing to stdin: $e", 1, false, false)
+    end
+
+    output = IOBuffer()
+    exit_code = -1
+    process_died = false
+    timed_out = false
+    timeout_s = timeout_ms / 1000
+    deadline = time() + timeout_s
+
+    while time() < deadline
+        remaining = deadline - time()
+        remaining <= 0 && break
+
+        local line
         try
-            write(session.stdin_pipe, wrapped)
-            flush(session.stdin_pipe)
-        catch e
-            return ("Error writing to stdin: $e", 1, false, false)
-        end
-
-        output = IOBuffer()
-        exit_code = -1
-        process_died = false
-        timed_out = false
-        timeout_s = timeout_ms / 1000
-        deadline = time() + timeout_s
-
-        while time() < deadline
-            remaining = deadline - time()
-            remaining <= 0 && break
-
-            local line
-            try
-                line = timedtake!(session.output_channel, min(1.0, remaining))
-            catch
-                # Channel closed or timed-out on this take.
-                # If the process died, drain remaining buffered items.
-                if !process_running(session.process)
-                    while isready(session.output_channel)
-                        line = take!(session.output_channel)
-                        idx = findfirst(marker, line)
-                        if idx !== nothing
-                            code_str = SubString(line, last(idx) + 1)
-                            exit_code = tryparse(Int, code_str)
-                            exit_code === nothing && (exit_code = -1)
-                            @goto done
-                        end
-                        print(output, line, "\n")
-                    end
-                    process_died = true
-                    break
-                end
-                continue
-            end
-
-            idx = findfirst(marker, line)
-            if idx !== nothing
-                code_str = SubString(line, last(idx) + 1)
-                exit_code = tryparse(Int, code_str)
-                exit_code === nothing && (exit_code = -1)
+            line = timedtake!(session.output_channel, min(1.0, remaining))
+        catch
+            # Channel closed or timed-out on this take.
+            if !process_running(session.process)
+                # Process died — drain any remaining buffered items
+                # looking for the marker.
+                exit_code, process_died =
+                    _drain_channel(session.output_channel, marker, output)
                 break
             end
-
-            print(output, line, "\n")
-        end
-        @label done
-
-        if exit_code == -1 && !process_died
-            timed_out = true
-        end
-
-        result = rstrip(String(take!(output)), '\n')
-
-        if length(result) > manager.max_output_chars
-            result = result[1:manager.max_output_chars] *
-                     "\n... (output truncated at $(manager.max_output_chars) characters)"
+            if !isopen(session.output_channel)
+                # Channel closed but process still running — shouldn't
+                # happen, but treat like process death to avoid spinning.
+                process_died = true
+                break
+            end
+            continue
         end
 
-        return (result, exit_code, process_died, timed_out)
+        idx = findfirst(marker, line)
+        if idx !== nothing
+            code_str = SubString(line, last(idx) + 1)
+            exit_code = tryparse(Int, code_str)
+            exit_code === nothing && (exit_code = -1)
+            break
+        end
+
+        print(output, line, "\n")
     end
+
+    if exit_code == -1 && !process_died
+        timed_out = true
+    end
+
+    result = rstrip(String(take!(output)), '\n')
+
+    if length(result) > manager.max_output_chars
+        result = result[1:manager.max_output_chars] *
+                 "\n... (output truncated at $(manager.max_output_chars) characters)"
+    end
+
+    return (result, exit_code, process_died, timed_out)
+end
+
+"""
+Drain remaining buffered items from a closed/closing channel, looking for
+the marker.  Returns `(exit_code, process_died)`.
+"""
+function _drain_channel(ch::Channel, marker::String, output::IOBuffer)
+    while isready(ch)
+        line = take!(ch)
+        idx = findfirst(marker, line)
+        if idx !== nothing
+            code_str = SubString(line, last(idx) + 1)
+            ec = tryparse(Int, code_str)
+            return (ec === nothing ? -1 : ec, false)
+        end
+        print(output, line, "\n")
+    end
+    return (-1, true)  # marker not found, process died
 end
 
 """
