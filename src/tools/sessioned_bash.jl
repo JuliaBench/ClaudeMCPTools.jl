@@ -30,6 +30,7 @@ mutable struct BashSession
     reader_task::Task
     metadata::Dict{String,Any}
     created_at::Float64
+    stderr_lines::Vector{String}   # accumulated during startup for error reporting
 end
 
 """
@@ -123,14 +124,17 @@ function start_session(manager::SessionManager, params::AbstractDict)
     id = string(uuid4())
     manager.log("Starting session $id")
 
-    # Launch with piped IO
+    # Launch with piped IO — stderr is captured separately so we can
+    # report errors if the process fails during startup.
     inp = Pipe()
     out = Pipe()
-    proc = run(pipeline(cmd, stdin=inp, stdout=out, stderr=stderr), wait=false)
+    err = Pipe()
+    proc = run(pipeline(cmd, stdin=inp, stdout=out, stderr=err), wait=false)
     close(inp.out)   # close read end in parent
     close(out.in)    # close write end in parent
+    close(err.in)    # close write end in parent
 
-    # Background reader: pushes lines into a channel
+    # Background reader for stdout: pushes lines into a channel
     ch = Channel{String}(10000)
     reader = @async begin
         try
@@ -145,7 +149,23 @@ function start_session(manager::SessionManager, params::AbstractDict)
         end
     end
 
-    session = BashSession(id, proc, inp.in, ch, reader, metadata, time())
+    # Background reader for stderr: logs in real-time and accumulates
+    # for error reporting.  After startup succeeds, stderr is merged
+    # into stdout via `exec 2>&1` so this reader goes idle.
+    stderr_lines = String[]
+    @async begin
+        try
+            while !eof(err.out)
+                line = readline(err.out)
+                manager.log("stderr[$id]: $line")
+                push!(stderr_lines, line)
+            end
+        catch e
+            e isa EOFError || nothing
+        end
+    end
+
+    session = BashSession(id, proc, inp.in, ch, reader, metadata, time(), stderr_lines)
     manager.sessions[id] = session
     manager.locks[id] = ReentrantLock()
 
@@ -167,8 +187,23 @@ function wait_for_ready(manager::SessionManager, session::BashSession)
     sleep(0.5)
 
     while time() < deadline
-        process_running(session.process) ||
-            error("Process exited during startup (exit code: $(session.process.exitcode))")
+        if !process_running(session.process)
+            # Process died — collect all available output for the error message
+            sleep(0.5)  # give stderr reader time to drain
+            stdout_lines = String[]
+            while isready(session.output_channel)
+                push!(stdout_lines, take!(session.output_channel))
+            end
+            parts = String[]
+            if !isempty(session.stderr_lines)
+                push!(parts, join(session.stderr_lines, "\n"))
+            end
+            if !isempty(stdout_lines)
+                push!(parts, join(stdout_lines, "\n"))
+            end
+            output_msg = isempty(parts) ? "" : "\n\nProcess output:\n" * join(parts, "\n")
+            error("Process exited during startup (exit code: $(session.process.exitcode))$output_msg")
+        end
 
         try
             write(session.stdin_pipe, "echo $(marker)\n")
@@ -209,7 +244,20 @@ function wait_for_ready(manager::SessionManager, session::BashSession)
         sleep(1)
     end
 
-    error("Timeout waiting for shell ($(manager.ready_timeout_s)s)")
+    # Timed out — collect what we have for diagnostics
+    parts = String[]
+    if !isempty(session.stderr_lines)
+        push!(parts, join(session.stderr_lines, "\n"))
+    end
+    stdout_lines = String[]
+    while isready(session.output_channel)
+        push!(stdout_lines, take!(session.output_channel))
+    end
+    if !isempty(stdout_lines)
+        push!(parts, join(stdout_lines, "\n"))
+    end
+    output_msg = isempty(parts) ? "" : "\n\nProcess output:\n" * join(parts, "\n")
+    error("Timeout waiting for shell ($(manager.ready_timeout_s)s)$output_msg")
 end
 
 """
