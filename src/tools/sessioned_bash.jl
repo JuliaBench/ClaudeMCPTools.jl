@@ -124,6 +124,16 @@ function start_session(manager::SessionManager, params::AbstractDict)
     id = string(uuid4())
     manager.log("Starting session $id")
 
+    # Detach from the parent's controlling terminal.  MCP servers typically
+    # run as a child of an interactive process (e.g. Claude Code in a TTY),
+    # so without this every descendant inherits that controlling TTY and can
+    # open `/dev/tty` to write escape sequences (focus reporting, raw mode,
+    # cursor positioning, ...) directly to the user's terminal — leaving it
+    # in a broken state that survives the session.  `detach=true` calls
+    # `setsid()` in the child, so `/dev/tty` resolves to ENXIO in the whole
+    # subtree.  See JuliaContainerization/Sandbox.jl#159.
+    cmd = Cmd(cmd; detach=true)
+
     # Launch with piped IO — stderr is captured separately so we can
     # report errors if the process fails during startup.
     inp = Pipe()

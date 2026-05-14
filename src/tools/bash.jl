@@ -92,11 +92,17 @@ function execute(tool::BashTool, params::AbstractDict)
         if !isempty(tool.env)
             cmd = addenv(cmd, tool.env)
         end
-        
+
+        # Detach from the parent's controlling terminal so the command (and
+        # any of its descendants) can't open `/dev/tty` and leak escape
+        # sequences to the user's terminal.  See
+        # JuliaContainerization/Sandbox.jl#159.
+        cmd = Cmd(cmd; detach=true)
+
         # Create pipes for stdout and stderr
         stdout_buf = IOBuffer()
         stderr_buf = IOBuffer()
-        
+
         # Start the process without waiting for it to complete
         process = open(pipeline(cmd, stdout=stdout_buf, stderr=stderr_buf))
         
