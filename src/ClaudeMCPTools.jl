@@ -15,6 +15,7 @@ export run_stdio_server, run_unix_socket_server
 # Include components
 include("types.jl")
 include("protocol.jl")
+include("process.jl")
 include("tools/bash.jl")
 include("tools/str_replace_editor.jl")
 include("tools/sessioned_bash.jl")

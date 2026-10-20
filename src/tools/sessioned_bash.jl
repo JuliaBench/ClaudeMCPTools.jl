@@ -124,6 +124,8 @@ function start_session(manager::SessionManager, params::AbstractDict)
     id = string(uuid4())
     manager.log("Starting session $id")
 
+    cmd = detached(cmd)
+
     # Launch with piped IO — stderr is captured separately so we can
     # report errors if the process fails during startup.
     inp = Pipe()
@@ -398,7 +400,7 @@ function stop_session(manager::SessionManager, session_id::String)
             catch end
             sleep(0.3)
             if process_running(session.process)
-                kill(session.process)
+                kill_group(session.process, Base.SIGTERM)
             end
         end
     catch end
