@@ -229,14 +229,21 @@ function wait_for_ready(manager::SessionManager, session::BashSession)
                     # Permanently redirect stderr→stdout so all command output
                     # is captured through the single pipe, and commands like
                     # `cd` run in the main shell (no subshell wrapping).
-                    write(session.stdin_pipe, "exec 2>&1\n")
+                    # Interactive shells on a pipe (e.g. BinaryBuilder's
+                    # `--debug` shell) echo input through readline and print
+                    # their prompt, which now lands on stdout; turn both off.
+                    # Wait for a second marker so the drain is not timing-based.
+                    setup_marker = generate_marker()
+                    write(session.stdin_pipe, "exec 2>&1; set +o emacs +o vi; PS1= PS2= PROMPT_COMMAND=\n" *
+                          "printf '%s%s\\n' '$(setup_marker[1:end÷2])' '$(setup_marker[end÷2+1:end])'\n")
                     flush(session.stdin_pipe)
-                    sleep(0.1)
-                    while isready(session.output_channel)
-                        take!(session.output_channel)
+                    setup_deadline = time() + 10.0
+                    while time() < setup_deadline
+                        line = timedtake!(session.output_channel,
+                                          max(0.1, setup_deadline - time()))
+                        contains(line, setup_marker) && return true
                     end
-
-                    return true
+                    break
                 end
             catch
                 break
@@ -289,8 +296,10 @@ function _exec_command_locked(manager::SessionManager, session::BashSession,
     marker = generate_marker()
 
     # Run command directly in the main shell (no subshell) so state like
-    # `cd` persists.  stderr already redirected via `exec 2>&1`.
-    wrapped = "$(command)\n__MCP_EC__=\$?; printf '\\n$(marker)%d\\n' \"\$__MCP_EC__\"\n"
+    # `cd` persists.  stderr already redirected via `exec 2>&1`.  The marker
+    # is split across printf arguments so that a shell echoing its input
+    # never prints it whole before the command has finished.
+    wrapped = "$(command)\n__MCP_EC__=\$?; printf '\\n%s%s%d\\n' '$(marker[1:end÷2])' '$(marker[end÷2+1:end])' \"\$__MCP_EC__\"\n"
 
     try
         write(session.stdin_pipe, wrapped)
