@@ -93,11 +93,7 @@ function execute(tool::BashTool, params::AbstractDict)
             cmd = addenv(cmd, tool.env)
         end
 
-        # Detach from the parent's controlling terminal so the command (and
-        # any of its descendants) can't open `/dev/tty` and leak escape
-        # sequences to the user's terminal.  See
-        # JuliaContainerization/Sandbox.jl#159.
-        cmd = Cmd(cmd; detach=true)
+        cmd = detached(cmd)
 
         # Create pipes for stdout and stderr
         stdout_buf = IOBuffer()
@@ -113,19 +109,7 @@ function execute(tool::BashTool, params::AbstractDict)
         while process_running(process)
             if time() - start_time > timeout_seconds
                 timed_out = true
-                # Kill the process forcefully
-                kill(process, Base.SIGKILL)
-                # Give it a brief moment to terminate
-                sleep(0.1)
-                # If still running, force terminate
-                if process_running(process)
-                    try
-                        # Force kill using SIGKILL
-                        kill(process, Base.SIGKILL)
-                    catch
-                        # Process might already be dead
-                    end
-                end
+                kill_group(process, Base.SIGKILL)
                 break
             end
             sleep(0.1)  # Check every 100ms
