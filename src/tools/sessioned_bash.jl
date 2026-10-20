@@ -227,7 +227,10 @@ function wait_for_ready(manager::SessionManager, session::BashSession)
                     # Permanently redirect stderr→stdout so all command output
                     # is captured through the single pipe, and commands like
                     # `cd` run in the main shell (no subshell wrapping).
-                    write(session.stdin_pipe, "exec 2>&1\n")
+                    # Interactive shells on a pipe (e.g. BinaryBuilder's
+                    # `--debug` shell) echo each input line through readline;
+                    # turn line editing off so command output stays clean.
+                    write(session.stdin_pipe, "exec 2>&1; set +o emacs +o vi\n")
                     flush(session.stdin_pipe)
                     sleep(0.1)
                     while isready(session.output_channel)
@@ -287,8 +290,10 @@ function _exec_command_locked(manager::SessionManager, session::BashSession,
     marker = generate_marker()
 
     # Run command directly in the main shell (no subshell) so state like
-    # `cd` persists.  stderr already redirected via `exec 2>&1`.
-    wrapped = "$(command)\n__MCP_EC__=\$?; printf '\\n$(marker)%d\\n' \"\$__MCP_EC__\"\n"
+    # `cd` persists.  stderr already redirected via `exec 2>&1`.  The marker
+    # is split across printf arguments so that a shell echoing its input
+    # never prints it whole before the command has finished.
+    wrapped = "$(command)\n__MCP_EC__=\$?; printf '\\n%s%s%d\\n' '$(marker[1:end÷2])' '$(marker[end÷2+1:end])' \"\$__MCP_EC__\"\n"
 
     try
         write(session.stdin_pipe, wrapped)
