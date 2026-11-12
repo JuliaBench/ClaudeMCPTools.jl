@@ -1,0 +1,12 @@
+# Replaces CompatHelper: opens PRs to widen [compat] entries when new
+# versions of dependencies are released.
+version: 2
+updates:
+  - package-ecosystem: "julia"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    groups:
+      all-julia-packages:
+        patterns:
+          - "*"
