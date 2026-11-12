@@ -13,7 +13,7 @@ A Julia implementation of basic Model Context Protocol (MCP) tools for Claude an
 
 ```julia
 using Pkg
-Pkg.add(url="https://github.com/JuliaComputing/ClaudeMCPTools.jl")
+Pkg.add(url="https://github.com/JuliaBench/ClaudeMCPTools.jl")
 ```
 
 ## Quick Start

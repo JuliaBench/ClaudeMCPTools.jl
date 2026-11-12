@@ -17,6 +17,52 @@ function get_user_home(uid::Int)
     return passwd_info.homedir
 end
 
+# How long to keep reading output after the command exits. A background job
+# that inherited stdout keeps the pipe open; don't hold the call open for it.
+const OUTPUT_DRAIN_GRACE_S = 1.0
+
+"""
+    run_with_timeout(cmd, timeout_seconds; sudo_uid=nothing) -> (stdout, stderr, exit_code)
+
+Run the detached `cmd` with stdin from `/dev/null`. On timeout, SIGKILL its
+whole process group and return `exit_code === nothing`. If background jobs
+outlive the command, its group stays tracked so they are killed when the
+server exits.
+"""
+function run_with_timeout(cmd::Cmd, timeout_seconds::Real; sudo_uid::Union{Int,Nothing}=nothing)
+    stdout_pipe, stderr_pipe = Pipe(), Pipe()
+    process = run(pipeline(cmd, stdin=devnull, stdout=stdout_pipe, stderr=stderr_pipe), wait=false)
+    group = track!(ProcessGroup(process; sudo_uid))
+    try
+        close(stdout_pipe.in)
+        close(stderr_pipe.in)
+        stdout_buf, stdout_task = start_reader(stdout_pipe)
+        stderr_buf, stderr_task = start_reader(stderr_pipe)
+
+        deadline = time() + timeout_seconds
+        while process_running(process)
+            if time() > deadline
+                kill_group(group, Base.SIGKILL)
+                return ("", "", nothing)
+            end
+            sleep(0.1)
+        end
+
+        # The shell has exited, but its output may still be in flight.
+        drain_deadline = min(deadline, time() + OUTPUT_DRAIN_GRACE_S)
+        while !(istaskdone(stdout_task) && istaskdone(stderr_task)) && time() < drain_deadline
+            sleep(0.01)
+        end
+        return (finish_reader!(stdout_pipe, stdout_buf, stdout_task),
+                finish_reader!(stderr_pipe, stderr_buf, stderr_task),
+                process.exitcode)
+    finally
+        close(stdout_pipe)
+        close(stderr_pipe)
+        retire!(group)
+    end
+end
+
 mutable struct BashTool <: MCPTool
     working_dir::String
     env::Dict{String, String}
@@ -93,43 +139,13 @@ function execute(tool::BashTool, params::AbstractDict)
             cmd = addenv(cmd, tool.env)
         end
 
-        cmd = detached(cmd)
-
-        # Create pipes for stdout and stderr
-        stdout_buf = IOBuffer()
-        stderr_buf = IOBuffer()
-
-        # Start the process without waiting for it to complete
-        process = open(pipeline(cmd, stdout=stdout_buf, stderr=stderr_buf))
-        
-        # Wait for completion with timeout
-        timed_out = false
-        start_time = time()
-        
-        while process_running(process)
-            if time() - start_time > timeout_seconds
-                timed_out = true
-                kill_group(process, Base.SIGKILL)
-                break
-            end
-            sleep(0.1)  # Check every 100ms
-        end
-        
-        # Don't wait for process if we killed it - just return timeout error
-        if timed_out
+        stdout_str, stderr_str, exit_code = run_with_timeout(detached(cmd), timeout_seconds; sudo_uid=tool.uid)
+        if exit_code === nothing
             return create_content_response(
-                "Error: Command timed out after $timeout_seconds seconds", 
+                "Error: Command timed out after $timeout_seconds seconds",
                 is_error=true
             )
         end
-        
-        # Get the process result
-        proc = process
-        
-        # Get the outputs
-        stdout_str = String(take!(stdout_buf))
-        stderr_str = String(take!(stderr_buf))
-        exit_code = proc.exitcode
 
         # Truncate output if needed (30KB = 30720 bytes)
         max_output_bytes = 30720

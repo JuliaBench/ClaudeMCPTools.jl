@@ -31,6 +31,7 @@ mutable struct BashSession
     metadata::Dict{String,Any}
     created_at::Float64
     stderr_lines::Vector{String}   # accumulated during startup for error reporting
+    group::ProcessGroup            # recorded at spawn; outlives the shell itself
 end
 
 """
@@ -135,6 +136,7 @@ function start_session(manager::SessionManager, params::AbstractDict)
     close(inp.out)   # close read end in parent
     close(out.in)    # close write end in parent
     close(err.in)    # close write end in parent
+    group = track!(ProcessGroup(proc))
 
     # Background reader for stdout: pushes lines into a channel
     ch = Channel{String}(10000)
@@ -167,13 +169,19 @@ function start_session(manager::SessionManager, params::AbstractDict)
         end
     end
 
-    session = BashSession(id, proc, inp.in, ch, reader, metadata, time(), stderr_lines)
+    session = BashSession(id, proc, inp.in, ch, reader, metadata, time(), stderr_lines, group)
     manager.sessions[id] = session
     manager.locks[id] = ReentrantLock()
 
     # Wait for the shell to become ready
     manager.log("Waiting for shell to become ready...")
-    wait_for_ready(manager, session)
+    try
+        wait_for_ready(manager, session)
+    catch
+        # The caller never gets an id for this session, so nobody else can stop it
+        stop_session(manager, id)
+        rethrow()
+    end
     manager.log("Session $id is ready")
 
     return session
@@ -214,7 +222,7 @@ function wait_for_ready(manager::SessionManager, session::BashSession)
             sleep(1); continue
         end
 
-        inner_deadline = time() + 10.0
+        inner_deadline = min(time() + 10.0, deadline)
         while time() < inner_deadline
             try
                 line = timedtake!(session.output_channel,
@@ -392,18 +400,20 @@ function stop_session(manager::SessionManager, session_id::String)
 
     manager.log("Stopping session $session_id")
 
-    try
-        if process_running(session.process)
-            try
-                write(session.stdin_pipe, "exit\n")
-                flush(session.stdin_pipe)
-            catch end
-            sleep(0.3)
-            if process_running(session.process)
-                kill_group(session.process, Base.SIGTERM)
-            end
+    if process_running(session.process)
+        try
+            write(session.stdin_pipe, "exit\n")
+            flush(session.stdin_pipe)
+        catch end
+        deadline = time() + 0.3
+        while process_running(session.process) && time() < deadline
+            sleep(0.02)
         end
-    catch end
+    end
+    # Signal the group even if the shell exited: background jobs started in
+    # the session are still in it.
+    terminate_groups([session.group])
+    untrack!(session.group)
 
     try close(session.stdin_pipe) catch end
     try close(session.output_channel) catch end

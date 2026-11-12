@@ -22,4 +22,10 @@ include("tools/sessioned_bash.jl")
 include("tools/sessioned_str_replace_editor.jl")
 include("server.jl")
 
+function __init__()
+    # Detached children no longer get SIGHUP when the terminal closes, so kill
+    # the ones still running when the server exits.
+    Sys.iswindows() || atexit(kill_tracked_groups)
+end
+
 end # module ClaudeMCPTools
