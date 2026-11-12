@@ -218,6 +218,17 @@ function run_stdio_server(server::MCPServer; verbose::Bool=false)
         @info "Starting MCP server in stdio mode"
     end
 
+    # Closing the client's terminal sends SIGHUP to its whole foreground
+    # process group, including this server. Julia does not run atexit hooks
+    # on SIGHUP, so the detached children started by the tools would be left
+    # running. Ignore it, like nohup: the client dies, stdin closes, and the
+    # normal exit below runs the cleanup. Spawned children get the default
+    # action back (libuv resets signal dispositions in the child).
+    if !Sys.iswindows()
+        SIGHUP, SIG_IGN = Cint(1), Ptr{Cvoid}(1)
+        ccall(:signal, Ptr{Cvoid}, (Cint, Ptr{Cvoid}), SIGHUP, SIG_IGN)
+    end
+
     stdout_lock = ReentrantLock()
 
     function send_response(response)

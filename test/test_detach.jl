@@ -96,6 +96,43 @@
         end
     end
 
+    @testset "Server cleans up when its terminal closes" begin
+        # SIGHUP is what the server gets when the client's terminal closes.
+        # The server must survive it and clean up once stdin closes.
+        script = """
+            using ClaudeMCPTools
+            server = MCPServer()
+            register_tool!(server, "bash", BashTool())
+            run_stdio_server(server)
+            """
+        julia = `$(Base.julia_cmd()) --startup-file=no --project=$(Base.active_project()) -e $script`
+        server = open(pipeline(julia, stderr=devnull), "r+")
+        try
+            call = Dict("jsonrpc" => "2.0", "id" => 1, "method" => "tools/call",
+                        "params" => Dict("name" => "bash", "arguments" => Dict(
+                            "command" => "sleep 300 >/dev/null 2>&1 & echo \$!")))
+            println(server, JSON.json(call))
+            flush(server)
+            response = JSON.parse(readline(server))
+            pid = parse(Int, strip(response["result"]["content"][1]["text"]))
+            @test !pid_gone(pid)
+
+            kill(server, Base.SIGHUP)
+            sleep(0.5)
+            @test process_running(server)
+            close(server.in)
+            deadline = time() + 30
+            while process_running(server) && time() < deadline
+                sleep(0.1)
+            end
+            @test !process_running(server)
+            @test success(server)
+            @test wait_gone(pid)
+        finally
+            process_running(server) && kill(server, Base.SIGKILL)
+        end
+    end
+
     manager = SessionManager(_ -> (`bash --norc --noprofile`, Dict{String,Any}());
                              ready_timeout_s=30.0, log=_ -> nothing)
 
