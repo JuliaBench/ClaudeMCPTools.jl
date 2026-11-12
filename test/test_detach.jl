@@ -1,5 +1,6 @@
 @testset "Detached subprocesses" begin
-    using ClaudeMCPTools: execute, kill_tracked_groups, TRACKED_GROUPS
+    using ClaudeMCPTools: execute, kill_tracked_groups, TRACKED_GROUPS, ProcessGroup,
+        detached, group_alive, kill_group, prune_tracked_groups!
 
     # A killed process can linger as a zombie until it is reaped, and kill(pid, 0)
     # still succeeds for it, so look at its state instead.
@@ -53,6 +54,34 @@
             @test haskey(TRACKED_GROUPS, job_pgid)
             kill_tracked_groups()
             @test wait_gone(pid)
+        end
+
+        @testset "Dead groups are pruned and never signalled again" begin
+            # The group outlives the command by a moment, so it stays tracked
+            out = text(execute(tool, Dict("command" => "echo \$\$; sleep 0.5 >/dev/null 2>&1 &")))
+            pgid = parse(Int, out)
+            @test haskey(TRACKED_GROUPS, pgid)
+            g = TRACKED_GROUPS[pgid]
+            deadline = time() + 10
+            while group_alive(g) && time() < deadline
+                sleep(0.05)
+            end
+            prune_tracked_groups!()
+            @test !haskey(TRACKED_GROUPS, pgid)
+            @test g.dead
+
+            # Once dead, the recorded id is never signalled, even if it now
+            # names a live group (here, a stand-in for a reused id).
+            other = run(pipeline(detached(`sleep 300`), stdin=devnull), wait=false)
+            try
+                stale = ProcessGroup(Cint(getpid(other)), g.process, nothing, true)
+                @test !group_alive(stale)
+                @test !kill_group(stale, Base.SIGTERM)
+                sleep(0.2)
+                @test process_running(other)
+            finally
+                kill(other)
+            end
         end
 
         if Sys.islinux() && ccall(:geteuid, Cuint, ()) != 0 && success(`sudo -n true`)

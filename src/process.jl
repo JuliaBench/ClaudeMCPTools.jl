@@ -21,16 +21,20 @@ The process group led by `process`, which must have been started from a
 throws once the leader has exited, but background jobs in the group may still
 be running. POSIX does not reuse a pid while a process group with that id
 exists, so the recorded id cannot name an unrelated group while any member of
-ours is alive.
+ours is alive. Once the group is seen empty it is marked `dead` and never
+signalled again, because by then the id may belong to someone else. Tracked
+groups are checked every `PRUNE_INTERVAL_S` seconds, so that window is short.
 
 Set `sudo_uid` when the leader is `sudo -u #uid ...`. A non-root server may
 not signal processes owned by that uid, so `kill_group` also signals the group
 through `sudo`.
 """
-struct ProcessGroup
-    pgid::Cint
-    process::Base.Process
-    sudo_uid::Union{Int,Nothing}
+mutable struct ProcessGroup
+    const pgid::Cint
+    const process::Base.Process
+    const sudo_uid::Union{Int,Nothing}
+    # An empty group can never gain members again, so this only goes false -> true
+    @atomic dead::Bool
 end
 
 function ProcessGroup(process::Base.Process; sudo_uid::Union{Int,Nothing}=nothing)
@@ -41,7 +45,7 @@ function ProcessGroup(process::Base.Process; sudo_uid::Union{Int,Nothing}=nothin
     catch
         Cint(0)
     end
-    return ProcessGroup(pgid, process, sudo_uid)
+    return ProcessGroup(pgid, process, sudo_uid, false)
 end
 
 _has_group(g::ProcessGroup) = !Sys.iswindows() && g.pgid > 1
@@ -50,12 +54,15 @@ _has_group(g::ProcessGroup) = !Sys.iswindows() && g.pgid > 1
     group_alive(g)
 
 Whether any process in the group still exists (including ones this process
-may not signal).
+may not signal). The first `false` marks the group dead for good.
 """
 function group_alive(g::ProcessGroup)
     _has_group(g) || return process_running(g.process)
+    (@atomic g.dead) && return false
     ret = ccall(:kill, Cint, (Cint, Cint), -g.pgid, 0)
-    return ret == 0 || Libc.errno() == Libc.EPERM
+    alive = ret == 0 || Libc.errno() == Libc.EPERM
+    alive || @atomic g.dead = true
+    return alive
 end
 
 function _can_signal_uid(uid::Integer)
@@ -70,7 +77,8 @@ _signal_name(signum::Integer) =
     kill_group(g, signum) -> Bool
 
 Signal every process in the group `g`, so grandchildren are not left running.
-Returns whether anything was signalled. Never throws.
+Returns whether anything was signalled. Never throws. A group already seen
+empty is not signalled, since its id may have been reused.
 
 If the group cannot be signalled (e.g. `EPERM`) and the leader is still
 running, the leader is signalled directly. Groups started through `sudo` are
@@ -79,7 +87,7 @@ signalled.
 """
 function kill_group(g::ProcessGroup, signum::Integer)
     signalled = false
-    if _has_group(g)
+    if _has_group(g) && group_alive(g)
         signalled = ccall(:kill, Cint, (Cint, Cint), -g.pgid, signum) == 0
         if g.sudo_uid !== nothing && !_can_signal_uid(g.sudo_uid)
             # Members running as the target uid are out of our reach; sudo
@@ -126,12 +134,34 @@ end
 const TRACKED_GROUPS = Dict{Cint,ProcessGroup}()
 const TRACKED_GROUPS_LOCK = ReentrantLock()
 
+# How often tracked groups are checked, so an empty group is marked dead
+# before its id can be reused. Pid reuse needs the whole pid range to wrap.
+const PRUNE_INTERVAL_S = 5.0
+const PRUNE_TIMER = Ref{Union{Timer,Nothing}}(nothing)
+
+"""
+Forget tracked groups that have died, marking them dead. Stops the pruning
+timer once nothing is tracked.
+"""
+function prune_tracked_groups!()
+    lock(TRACKED_GROUPS_LOCK) do
+        filter!(p -> group_alive(p.second), TRACKED_GROUPS)
+        if isempty(TRACKED_GROUPS) && PRUNE_TIMER[] !== nothing
+            close(PRUNE_TIMER[])
+            PRUNE_TIMER[] = nothing
+        end
+    end
+    return nothing
+end
+
 function track!(g::ProcessGroup)
     _has_group(g) || return g
     lock(TRACKED_GROUPS_LOCK) do
-        # Forget groups that have died, so the table does not grow without bound
         filter!(p -> group_alive(p.second), TRACKED_GROUPS)
         TRACKED_GROUPS[g.pgid] = g
+        if PRUNE_TIMER[] === nothing
+            PRUNE_TIMER[] = Timer(_ -> prune_tracked_groups!(), PRUNE_INTERVAL_S; interval=PRUNE_INTERVAL_S)
+        end
     end
     return g
 end
@@ -160,6 +190,8 @@ function kill_tracked_groups(; grace_s::Real=1.0)
     groups = lock(TRACKED_GROUPS_LOCK) do
         gs = collect(values(TRACKED_GROUPS))
         empty!(TRACKED_GROUPS)
+        PRUNE_TIMER[] === nothing || close(PRUNE_TIMER[])
+        PRUNE_TIMER[] = nothing
         gs
     end
     terminate_groups(groups; grace_s)
