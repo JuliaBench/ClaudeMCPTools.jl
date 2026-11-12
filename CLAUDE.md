@@ -9,8 +9,8 @@ When asked to "ship it" or after making changes:
 3. Run tests locally and make sure they pass: `julia --project=. -e 'using Pkg; Pkg.test()'`
 4. Push to the repository: `git push origin master`
 5. **IMPORTANT**: Monitor the GitHub Actions CI run
-   - Use: `gh run list --repo JuliaComputing/ClaudeMCPTools.jl --branch master --limit 1` to find the run
-   - Use: `gh run watch <run-id> --repo JuliaComputing/ClaudeMCPTools.jl --exit-status` to monitor it (can take up to 10 minutes)
+   - Use: `gh run list --repo JuliaBench/ClaudeMCPTools.jl --branch master --limit 1` to find the run
+   - Use: `gh run watch <run-id> --repo JuliaBench/ClaudeMCPTools.jl --exit-status` to monitor it (can take up to 10 minutes)
    - If it fails, investigate and fix before considering the task complete
 
 ## Testing
