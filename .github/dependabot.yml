@@ -1,5 +1,6 @@
 # Replaces CompatHelper: opens PRs to widen [compat] entries when new
-# versions of dependencies are released.
+# versions of dependencies are released. Also keeps the GitHub Actions used
+# by the workflows up to date.
 version: 2
 updates:
   - package-ecosystem: "julia"
@@ -8,5 +9,13 @@ updates:
       interval: "daily"
     groups:
       all-julia-packages:
+        patterns:
+          - "*"
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      all-actions:
         patterns:
           - "*"
